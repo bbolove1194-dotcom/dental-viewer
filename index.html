@@ -97,6 +97,23 @@
   #toast { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(60px); background: var(--bg3); border: 1px solid var(--border2); border-radius: 8px; padding: 10px 18px; font-size: 12px; color: var(--text2); transition: transform 0.3s; z-index: 30; white-space: nowrap; max-width: 90vw; }
   #toast.show { transform: translateX(-50%) translateY(0); }
 
+  /* 공유 URL 버튼 + 링크 모달 */
+  #publish-btn { display:none; width:100%; margin-top:8px; padding:9px; background:var(--accent); border:none; border-radius:8px; color:#04222e; font-size:12px; font-weight:700; font-family:inherit; cursor:pointer; }
+  #publish-btn:hover { background:var(--accent2); }
+  #publish-btn:disabled { opacity:0.6; cursor:default; }
+  body.share-mode .light-controls,
+  body.share-mode #publish-btn,
+  body.share-mode #btn-newfile { display:none !important; }
+  #link-modal { position:absolute; inset:0; z-index:40; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,0.55); padding:20px; }
+  #link-modal .lm-box { width:min(440px,92vw); background:var(--bg2); border:1px solid var(--border2); border-radius:14px; padding:20px; display:flex; flex-direction:column; gap:12px; }
+  #link-modal h3 { font-size:15px; font-weight:700; }
+  #link-modal p { font-size:12px; color:var(--text2); line-height:1.6; }
+  #lm-url { width:100%; background:var(--bg3); border:1px solid var(--border2); border-radius:8px; color:var(--text); font-size:12px; padding:10px; font-family:'DM Mono',monospace; }
+  #link-modal .lm-btns { display:flex; gap:8px; }
+  #link-modal .lm-btns button { flex:1; padding:10px; border-radius:8px; border:1px solid var(--border); font-family:inherit; font-size:12px; cursor:pointer; }
+  #link-modal .lm-copy { background:var(--accent); color:#04222e; border:none; font-weight:700; }
+  #link-modal .lm-close { background:var(--bg3); color:var(--text2); }
+
   @media (max-width: 640px) {
     #topbar .hint { display: none; }
     #panel { width: 190px; }
@@ -161,6 +178,7 @@
           <span class="lc-val" id="lc-expo">149</span>
         </div>
       </div>
+      <button id="publish-btn" onclick="publishCase()">🔗 공유 URL 만들기</button>
     </div>
     <button id="panel-open" onclick="expandPanel()">☰ 파일</button>
 
@@ -171,7 +189,20 @@
       <button onclick="setView('left')">좌측</button>
       <button onclick="setView('right')">우측</button>
       <button onclick="fitView()">전체</button>
-      <button onclick="resetAll()" style="color:#ef9a9a">새파일</button>
+      <button id="btn-newfile" onclick="resetAll()" style="color:#ef9a9a">새파일</button>
+    </div>
+
+    <!-- 공유 링크 결과 모달 -->
+    <div id="link-modal">
+      <div class="lm-box">
+        <h3>🔗 공유 링크가 만들어졌어요</h3>
+        <p>아래 주소를 복사해서 카카오톡으로 원장님께 보내세요. (링크는 30일 후 자동 삭제)</p>
+        <input id="lm-url" readonly onclick="this.select()">
+        <div class="lm-btns">
+          <button class="lm-copy" onclick="copyLink()">📋 링크 복사</button>
+          <button class="lm-close" onclick="closeLinkModal()">닫기</button>
+        </div>
+      </div>
     </div>
 
     <div id="toast"></div>
@@ -180,6 +211,13 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
+// ════════ 공유(R2) 설정 ════════
+const R2_PUBLIC_BASE = "https://pub-fa279be67d4043748c95034c45d58f8c.r2.dev"; // R2 공개 주소 (비밀 아님)
+const _params = new URLSearchParams(location.search);
+const CASE_ID = _params.get('case');                       // ?case=xxx 있으면 공유 케이스 보기
+const SHARE_VIEW = _params.get('view') === 'share';         // ?view=share 이면 화면조절 숨김(원장님용)
+const IS_LOCAL = ['localhost', '127.0.0.1'].includes(location.hostname); // 도우미 서버에서 열렸나
+
 // 3가지 색만: 상하악(회색), 치아(아이보리), 어버트(톤다운 하늘색)
 const COL_ARCH = 0xd2d2d6;   // 상하악 회색 (옅게)
 const COL_TOOTH = 0xe8ddc4;  // 치아 아이보리
@@ -593,6 +631,125 @@ function setExposure(v) {
   document.getElementById('lc-expo').textContent = v;
   if(renderer) renderer.toneMappingExposure = v/100;
 }
+
+// ════════ 공유 URL 만들기 (PC 도우미 서버 사용) ════════
+async function publishCase() {
+  const uploadable = items.filter(it => it.file);
+  if (!uploadable.length) { showToast('먼저 파일을 불러오세요'); return; }
+  const btn = document.getElementById('publish-btn');
+  const old = btn.textContent; btn.disabled = true;
+  try {
+    const caseId = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const name = document.getElementById('case-input').value.trim()
+              || document.getElementById('topbar-case').textContent || '케이스';
+    const files = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (!it.file) continue; // 원본 파일 없는 항목(불러온 케이스)은 건너뜀
+      btn.textContent = `업로드 중 ${files.length + 1}/${uploadable.length}`;
+      const ext = (it.file.name.split('.').pop() || 'stl').toLowerCase();
+      const ab = await it.file.arrayBuffer();
+      const resp = await fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'X-Case-Id': caseId, 'X-File-Index': String(i), 'X-File-Ext': ext },
+        body: ab
+      });
+      if (!resp.ok) throw new Error('업로드 실패 ' + resp.status);
+      const j = await resp.json();
+      files.push({ key: j.key, name: it.file.name, color: it.color, level: it.level, useScanColor: !!it.useScanColor });
+    }
+    btn.textContent = '링크 생성 중...';
+    const view = {
+      brightness: +document.getElementById('lc-bright').textContent || 55,
+      gloss: +document.getElementById('lc-gloss').textContent || 91,
+      exposure: +document.getElementById('lc-expo').textContent || 149
+    };
+    const fin = await fetch('/api/finish', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ caseId, manifest: { name, files, view } })
+    });
+    if (!fin.ok) throw new Error('링크 생성 실패 ' + fin.status);
+    const r = await fin.json();
+    showLinkModal(r.shareUrl);
+  } catch (e) {
+    console.error(e);
+    showToast('URL 만들기 실패: ' + e.message + ' (도우미 서버가 켜져 있나요?)');
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
+}
+
+function showLinkModal(url) {
+  document.getElementById('lm-url').value = url;
+  document.getElementById('link-modal').style.display = 'flex';
+}
+function closeLinkModal() { document.getElementById('link-modal').style.display = 'none'; }
+function copyLink() {
+  const i = document.getElementById('lm-url');
+  i.select();
+  const done = () => showToast('링크 복사됨! 카카오톡에 붙여넣으세요');
+  if (navigator.clipboard) navigator.clipboard.writeText(i.value).then(done).catch(()=>{ document.execCommand('copy'); done(); });
+  else { document.execCommand('copy'); done(); }
+}
+
+// ════════ 공유 케이스 불러오기 (원장님 폰 / ?case=xxx) ════════
+function syncViewSliders(v) {
+  const map = { setBrightness: v.brightness ?? 55, setGloss: v.gloss ?? 91, setExposure: v.exposure ?? 149 };
+  document.querySelectorAll('.lc-slider').forEach(inp => {
+    const fn = inp.getAttribute('oninput') || '';
+    for (const key in map) if (fn.includes(key)) inp.value = map[key];
+  });
+}
+
+async function loadCase(caseId) {
+  try {
+    if (!renderer) { initScene(); }
+    const res = await fetch(`${R2_PUBLIC_BASE}/cases/${caseId}/case.json`, { cache: 'no-store' });
+    if (!res.ok) throw new Error('케이스 정보 없음 (' + res.status + ')');
+    const m = await res.json();
+    document.getElementById('topbar-case').textContent = m.name || '케이스';
+    const bar = document.getElementById('loading-bar'); bar.style.transform = 'scaleX(0.05)';
+    const list = m.files || [];
+    let done = 0;
+    for (const f of list) {
+      try {
+        const ab = await (await fetch(`${R2_PUBLIC_BASE}/${f.key}`, { cache: 'no-store' })).arrayBuffer();
+        const nm = f.name || f.key;
+        const item = { id: ++itemSeq, file: null, mesh: null,
+          level: (f.level != null ? f.level : 100),
+          color: (f.color != null ? f.color : COL_TOOTH),
+          useScanColor: !!f.useScanColor, geometry: null, hasVertexColor: false };
+        const geo = parseFile(nm, ab); geo.computeBoundingBox();
+        item.geometry = geo; item.hasVertexColor = !!geo._hasColor;
+        items.push(item); buildMesh(item);
+      } catch (err) { console.error('파일 로드 실패:', f.key, err); }
+      done++; bar.style.transform = `scaleX(${done / list.length})`;
+    }
+    const v = m.view || {};
+    setBrightness(v.brightness ?? 55);
+    setGloss(v.gloss ?? 91);
+    setExposure(v.exposure ?? 149);
+    syncViewSliders(v);
+    _spanDirty = true; fitView(); buildSliders();
+    document.getElementById('start-screen').classList.add('hidden');
+    document.getElementById('panel').classList.add('show');
+    document.getElementById('view-bar').classList.add('show');
+    bar.style.transform = 'scaleX(1)'; setTimeout(() => { bar.style.transform = 'scaleX(0)'; }, 500);
+    showToast(`${list.length}개 파일 불러옴`);
+  } catch (e) {
+    console.error(e);
+    document.querySelector('.ss-header h1').textContent = '케이스를 불러올 수 없습니다';
+    document.querySelector('.ss-header p').textContent = e.message + ' — 링크가 만료되었거나 잘못되었을 수 있어요.';
+    showToast('불러오기 실패: ' + e.message);
+  }
+}
+
+// ════════ 페이지 진입 처리 ════════
+(function initEntry() {
+  if (SHARE_VIEW) document.body.classList.add('share-mode');
+  if (IS_LOCAL && !SHARE_VIEW) document.getElementById('publish-btn').style.display = 'block';
+  if (CASE_ID) loadCase(CASE_ID);
+})();
 </script>
 </body>
 </html>
