@@ -103,7 +103,19 @@
   #publish-btn:disabled { opacity:0.6; cursor:default; }
   body.share-mode .light-controls,
   body.share-mode #publish-btn,
-  body.share-mode #btn-newfile { display:none !important; }
+  body.share-mode #btn-newfile,
+  body.share-mode .p-head,
+  body.share-mode .p-foot,
+  body.share-mode #view-bar { display:none !important; }
+  /* 공유 화면: 패널/조절바 작게 */
+  body.share-mode #panel { width:140px; padding:7px; gap:5px; }
+  body.share-mode .slider-row { gap:7px; }
+  body.share-mode .sl-swatch { width:13px; height:13px; }
+  body.share-mode .sl-input { height:4px; }
+  body.share-mode .sl-input::-webkit-slider-thumb { width:12px; height:12px; }
+  body.share-mode .sl-input::-moz-range-thumb { width:12px; height:12px; }
+  body.share-mode .sl-pct { font-size:9px; width:22px; }
+  body.share-mode #slider-list > div { padding:2px 3px !important; }
   #link-modal { position:absolute; inset:0; z-index:40; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,0.55); padding:20px; }
   #link-modal .lm-box { width:min(440px,92vw); background:var(--bg2); border:1px solid var(--border2); border-radius:14px; padding:20px; display:flex; flex-direction:column; gap:12px; }
   #link-modal h3 { font-size:15px; font-weight:700; }
@@ -121,6 +133,9 @@
   #case-loading .cl-sub { font-size:11px; color:var(--text3); }
   .cl-spin { width:38px; height:38px; border:3px solid rgba(255,255,255,0.15); border-top-color:var(--accent); border-radius:50%; animation:clspin 0.8s linear infinite; }
   @keyframes clspin { to { transform:rotate(360deg); } }
+
+  /* 저작권 워터마크 (항상 표시, 조작 방해 안 함) */
+  #watermark { position:absolute; right:10px; bottom:8px; z-index:8; font-size:10px; color:rgba(40,52,74,0.42); pointer-events:none; font-family:'Noto Sans KR',sans-serif; letter-spacing:0.02em; }
 
   @media (max-width: 640px) {
     #topbar .hint { display: none; }
@@ -220,6 +235,8 @@
       <div class="cl-sub" id="cl-sub"></div>
     </div>
 
+    <div id="watermark">파트너스치과기공소 전용 · 무단사용 금지</div>
+
     <div id="toast"></div>
   </div>
 </div>
@@ -232,6 +249,9 @@ const _params = new URLSearchParams(location.search);
 const CASE_ID = _params.get('case');                       // ?case=xxx 있으면 공유 케이스 보기
 const SHARE_VIEW = _params.get('view') === 'share';         // ?view=share 이면 화면조절 숨김(원장님용)
 const IS_LOCAL = ['localhost', '127.0.0.1'].includes(location.hostname); // 도우미 서버에서 열렸나
+// ── 도용 방지: 허가된 주소에서만 작동 (파트너스치과기공소 전용) ──
+const ALLOWED_HOSTS = ['bbolove1194-dotcom.github.io', 'localhost', '127.0.0.1'];
+const IS_AUTHORIZED = ALLOWED_HOSTS.includes(location.hostname);
 
 // 3가지 색만: 상하악(회색), 치아(아이보리), 어버트(톤다운 하늘색)
 const COL_ARCH = 0xd2d2d6;   // 상하악 회색 (옅게)
@@ -520,6 +540,7 @@ function buildMesh(item) {
 
 // ════════ 로드 ════════
 async function handleFiles(fileList) {
+  if (!IS_AUTHORIZED) return;
   const valid = Array.from(fileList).filter(f=>{const n=f.name.toLowerCase();return n.endsWith('.stl')||n.endsWith('.ply');});
   if (valid.length===0){ showToast('STL 또는 PLY 파일이 없습니다'); return; }
   const caseName = document.getElementById('case-input').value.trim() || '케이스';
@@ -606,15 +627,15 @@ function buildSliders() {
     row.style.cssText='display:flex;flex-direction:column;gap:0;padding:4px 6px;border-radius:8px;'+(isSel?'background:rgba(79,195,247,0.15);outline:1px solid var(--accent);':'');
     row.innerHTML=`
       <div class="slider-row">
-        <div class="sl-swatch" style="${swatchStyle}" title="색상 변경" onclick="toggleColorPop(${item.id})"></div>
+        <div class="sl-swatch" style="${swatchStyle}${SHARE_VIEW?';cursor:default':''}" ${SHARE_VIEW?'':`title="색상 변경" onclick="toggleColorPop(${item.id})"`}></div>
         <div class="sl-track">
           <input type="range" class="sl-input" min="0" max="100" value="${item.level}" oninput="setLevel(${item.id}, this.value)">
         </div>
         <span class="sl-pct" id="pct-${item.id}">${item.level==0?'꺼짐':item.level+'%'}</span>
       </div>`;
     list.appendChild(row);
-    // 선택됐거나 색판 열린 항목은 색 선택 표시
-    if (openColorId === item.id || isSel) {
+    // 선택됐거나 색판 열린 항목은 색 선택 표시 (공유 모드에선 색 선택 없음)
+    if (!SHARE_VIEW && (openColorId === item.id || isSel)) {
       const pop=document.createElement('div'); pop.className='color-pop'; pop.style.marginTop='4px';
       const curHex = '#'+new THREE.Color(item.color).getHexString();
       let inner = COLOR_CHIPS.map(ch=>{
@@ -829,6 +850,16 @@ async function loadCase(caseId) {
 
 // ════════ 페이지 진입 처리 ════════
 (function initEntry() {
+  if (!IS_AUTHORIZED) {
+    document.body.style.cssText = 'margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#0a0d12;font-family:sans-serif;text-align:center;padding:24px;';
+    document.body.innerHTML = '<div style="color:#9aa0ad;line-height:2;font-size:15px;max-width:520px">'
+      + '<div style="font-size:34px;margin-bottom:12px">🔒</div>'
+      + '<div>이 3D 뷰어는 <b style="color:#e8eaf0">파트너스치과기공소</b> 전용입니다.</div>'
+      + '<div>무단 복제 · 배포 · 사용을 금합니다.</div>'
+      + '<div style="font-size:12px;color:#555a6e;margin-top:14px">© Partners Dental Lab</div>'
+      + '</div>';
+    return;
+  }
   if (SHARE_VIEW) document.body.classList.add('share-mode');
   if (IS_LOCAL && !SHARE_VIEW) document.getElementById('publish-btn').style.display = 'block';
   if (CASE_ID) loadCase(CASE_ID);
