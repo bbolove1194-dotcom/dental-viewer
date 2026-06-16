@@ -114,6 +114,14 @@
   #link-modal .lm-copy { background:var(--accent); color:#04222e; border:none; font-weight:700; }
   #link-modal .lm-close { background:var(--bg3); color:var(--text2); }
 
+  /* 공유 케이스 로딩 화면 */
+  #case-loading { position:absolute; inset:0; z-index:7; display:none; flex-direction:column; align-items:center; justify-content:center; gap:16px; background:#0a0d12; color:var(--text2); }
+  #case-loading.show { display:flex; }
+  #case-loading .cl-text { font-size:13px; }
+  #case-loading .cl-sub { font-size:11px; color:var(--text3); }
+  .cl-spin { width:38px; height:38px; border:3px solid rgba(255,255,255,0.15); border-top-color:var(--accent); border-radius:50%; animation:clspin 0.8s linear infinite; }
+  @keyframes clspin { to { transform:rotate(360deg); } }
+
   @media (max-width: 640px) {
     #topbar .hint { display: none; }
     #panel { width: 190px; }
@@ -203,6 +211,13 @@
           <button class="lm-close" onclick="closeLinkModal()">닫기</button>
         </div>
       </div>
+    </div>
+
+    <!-- 공유 케이스 로딩 화면 -->
+    <div id="case-loading">
+      <div class="cl-spin"></div>
+      <div class="cl-text">3D 모델 불러오는 중…</div>
+      <div class="cl-sub" id="cl-sub"></div>
     </div>
 
     <div id="toast"></div>
@@ -350,32 +365,83 @@ function bindControls() {
     const hits=raycaster.intersectObjects(objs,false);
     if(hits.length){ ctrl.target.copy(hits[0].point); ctrl.r=camera.position.distanceTo(ctrl.target); camera.lookAt(ctrl.target); }
   });
-  cv.addEventListener('pointerdown', e=>{ pointerMoved=false; lx=e.clientX; ly=e.clientY; orbDragging=e.button===0?'rot':'pan'; cv.setPointerCapture(e.pointerId); });
-  cv.addEventListener('pointermove', e=>{
-    const dx=e.clientX-lx, dy=e.clientY-ly;
-    if(Math.abs(dx)>2||Math.abs(dy)>2) pointerMoved=true;
-    lx=e.clientX; ly=e.clientY; if(!orbDragging) return;
-    if(orbDragging==='rot'){
-      const right=new THREE.Vector3().setFromMatrixColumn(camera.matrix,0);
-      const upVec=new THREE.Vector3().setFromMatrixColumn(camera.matrix,1);
-      const speed=0.007;
-      const q=new THREE.Quaternion().setFromAxisAngle(upVec,-dx*speed).multiply(new THREE.Quaternion().setFromAxisAngle(right,-dy*speed));
-      const offset=camera.position.clone().sub(ctrl.target); offset.applyQuaternion(q); camera.up.applyQuaternion(q);
-      camera.position.copy(ctrl.target).add(offset); ctrl.r=offset.length(); camera.lookAt(ctrl.target);
+  // 멀티터치 추적
+  const pointers = new Map();
+  let pinchPrev = null;
+  function pinchState(){
+    const p=[...pointers.values()];
+    const dx=p[0].x-p[1].x, dy=p[0].y-p[1].y;
+    return { dist:Math.hypot(dx,dy)||1, cx:(p[0].x+p[1].x)/2, cy:(p[0].y+p[1].y)/2 };
+  }
+  function doRotate(dx,dy){
+    const right=new THREE.Vector3().setFromMatrixColumn(camera.matrix,0);
+    const upVec=new THREE.Vector3().setFromMatrixColumn(camera.matrix,1);
+    const speed=0.007;
+    const q=new THREE.Quaternion().setFromAxisAngle(upVec,-dx*speed).multiply(new THREE.Quaternion().setFromAxisAngle(right,-dy*speed));
+    const offset=camera.position.clone().sub(ctrl.target); offset.applyQuaternion(q); camera.up.applyQuaternion(q);
+    camera.position.copy(ctrl.target).add(offset); ctrl.r=offset.length(); camera.lookAt(ctrl.target);
+  }
+  function doPan(dx,dy){
+    const ps=ctrl.r*0.001;
+    const right=new THREE.Vector3().setFromMatrixColumn(camera.matrix,0);
+    const up=new THREE.Vector3().setFromMatrixColumn(camera.matrix,1);
+    ctrl.target.addScaledVector(right,-dx*ps).addScaledVector(up,dy*ps);
+    camera.position.addScaledVector(right,-dx*ps).addScaledVector(up,dy*ps); camera.lookAt(ctrl.target);
+  }
+  function doZoom(factor){
+    const offset=camera.position.clone().sub(ctrl.target).multiplyScalar(factor);
+    ctrl.r=Math.max(0.5,Math.min(3000,offset.length())); offset.setLength(ctrl.r);
+    camera.position.copy(ctrl.target).add(offset); camera.lookAt(ctrl.target);
+  }
+
+  cv.addEventListener('pointerdown', e=>{
+    cv.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
+    pointerMoved=false; lx=e.clientX; ly=e.clientY;
+    if(e.pointerType==='touch'){
+      if(pointers.size>=2){ orbDragging='pinch'; pinchPrev=pinchState(); }
+      else orbDragging='rot';
     } else {
-      const ps=ctrl.r*0.001;
-      const right=new THREE.Vector3().setFromMatrixColumn(camera.matrix,0);
-      const up=new THREE.Vector3().setFromMatrixColumn(camera.matrix,1);
-      ctrl.target.addScaledVector(right,-dx*ps).addScaledVector(up,dy*ps);
-      camera.position.addScaledVector(right,-dx*ps).addScaledVector(up,dy*ps); camera.lookAt(ctrl.target);
+      orbDragging = e.button===0 ? 'rot' : 'pan';
     }
   });
-  cv.addEventListener('pointerup', e=>{
-    // 드래그 안 했으면(=클릭) 메쉬 선택
-    if(!pointerMoved && orbDragging==='rot') doPickSelect(e);
-    orbDragging=null;
+  cv.addEventListener('pointermove', e=>{
+    const rec=pointers.get(e.pointerId); if(rec){ rec.x=e.clientX; rec.y=e.clientY; }
+    if(!orbDragging) return;
+    // 두 손가락: 핀치=줌 + 중심이동=팬
+    if(orbDragging==='pinch' && pointers.size>=2){
+      const now=pinchState();
+      if(pinchPrev){
+        doZoom(pinchPrev.dist/now.dist);
+        doPan(now.cx-pinchPrev.cx, now.cy-pinchPrev.cy);
+      }
+      pinchPrev=now; pointerMoved=true; return;
+    }
+    const dx=e.clientX-lx, dy=e.clientY-ly;
+    if(Math.abs(dx)>2||Math.abs(dy)>2) pointerMoved=true;
+    lx=e.clientX; ly=e.clientY;
+    if(orbDragging==='rot') doRotate(dx,dy);
+    else if(orbDragging==='pan') doPan(dx,dy);
   });
-  cv.addEventListener('pointercancel', ()=>{ orbDragging=null; });
+  cv.addEventListener('pointerup', e=>{
+    pointers.delete(e.pointerId);
+    if(e.pointerType==='touch'){
+      if(pointers.size===1){ // 핀치 끝, 한 손가락 남음 → 회전 모드로 전환(튐 방지)
+        const p=[...pointers.values()][0]; lx=p.x; ly=p.y; orbDragging='rot'; pinchPrev=null; pointerMoved=true;
+      } else if(pointers.size===0){
+        if(!pointerMoved && orbDragging==='rot') doPickSelect(e);
+        orbDragging=null; pinchPrev=null;
+      }
+    } else {
+      if(!pointerMoved && orbDragging==='rot') doPickSelect(e);
+      orbDragging=null;
+    }
+  });
+  cv.addEventListener('pointercancel', e=>{
+    pointers.delete(e.pointerId);
+    if(pointers.size<2) pinchPrev=null;
+    if(pointers.size===0) orbDragging=null;
+  });
   cv.addEventListener('contextmenu', e=>e.preventDefault());
   cv.addEventListener('wheel', e=>{
     e.preventDefault();
@@ -702,45 +768,62 @@ function syncViewSliders(v) {
 }
 
 async function loadCase(caseId) {
+  // 즉시 업로드 화면을 감추고 로딩 화면을 띄움 (3D 뜨기 전 빈 화면/업로드창 방지)
+  const loading = document.getElementById('case-loading');
+  const clSub = document.getElementById('cl-sub');
+  document.getElementById('start-screen').classList.add('hidden');
+  loading.classList.add('show');
   try {
     if (!renderer) { initScene(); }
-    const res = await fetch(`${R2_PUBLIC_BASE}/cases/${caseId}/case.json`, { cache: 'no-store' });
+    const res = await fetch(`${R2_PUBLIC_BASE}/cases/${caseId}/case.json`);
     if (!res.ok) throw new Error('케이스 정보 없음 (' + res.status + ')');
     const m = await res.json();
     document.getElementById('topbar-case').textContent = m.name || '케이스';
-    const bar = document.getElementById('loading-bar'); bar.style.transform = 'scaleX(0.05)';
     const list = m.files || [];
-    let done = 0;
-    for (const f of list) {
+    clSub.textContent = `파일 ${list.length}개`;
+    const bar = document.getElementById('loading-bar'); bar.style.transform = 'scaleX(0.05)';
+
+    // 모든 파일을 "동시에" 내려받기 (순차 대비 훨씬 빠름)
+    const buffers = await Promise.all(list.map(f =>
+      fetch(`${R2_PUBLIC_BASE}/${f.key}`).then(r => {
+        if (!r.ok) throw new Error('파일 ' + r.status);
+        return r.arrayBuffer();
+      }).catch(err => { console.error('다운로드 실패:', f.key, err); return null; })
+    ));
+
+    // 받은 순서대로 파싱 + 메쉬 생성
+    for (let i = 0; i < list.length; i++) {
+      const f = list[i], ab = buffers[i];
+      if (!ab) continue;
       try {
-        const ab = await (await fetch(`${R2_PUBLIC_BASE}/${f.key}`, { cache: 'no-store' })).arrayBuffer();
-        const nm = f.name || f.key;
         const item = { id: ++itemSeq, file: null, mesh: null,
           level: (f.level != null ? f.level : 100),
           color: (f.color != null ? f.color : COL_TOOTH),
           useScanColor: !!f.useScanColor, geometry: null, hasVertexColor: false };
-        const geo = parseFile(nm, ab); geo.computeBoundingBox();
+        const geo = parseFile(f.name || f.key, ab); geo.computeBoundingBox();
         item.geometry = geo; item.hasVertexColor = !!geo._hasColor;
         items.push(item); buildMesh(item);
-      } catch (err) { console.error('파일 로드 실패:', f.key, err); }
-      done++; bar.style.transform = `scaleX(${done / list.length})`;
+      } catch (err) { console.error('파싱 실패:', f.key, err); }
+      bar.style.transform = `scaleX(${(i + 1) / list.length})`;
     }
+    if (!items.length) throw new Error('표시할 파일이 없습니다');
+
     const v = m.view || {};
     setBrightness(v.brightness ?? 55);
     setGloss(v.gloss ?? 91);
     setExposure(v.exposure ?? 149);
     syncViewSliders(v);
     _spanDirty = true; fitView(); buildSliders();
-    document.getElementById('start-screen').classList.add('hidden');
     document.getElementById('panel').classList.add('show');
     document.getElementById('view-bar').classList.add('show');
+    loading.classList.remove('show');
     bar.style.transform = 'scaleX(1)'; setTimeout(() => { bar.style.transform = 'scaleX(0)'; }, 500);
-    showToast(`${list.length}개 파일 불러옴`);
   } catch (e) {
     console.error(e);
+    loading.classList.remove('show');
+    document.getElementById('start-screen').classList.remove('hidden');
     document.querySelector('.ss-header h1').textContent = '케이스를 불러올 수 없습니다';
     document.querySelector('.ss-header p').textContent = e.message + ' — 링크가 만료되었거나 잘못되었을 수 있어요.';
-    showToast('불러오기 실패: ' + e.message);
   }
 }
 
